@@ -18,7 +18,7 @@ erl_crash.dump
 
 # Ignore package tarball (built via "mix hex.build").
 elixir_edulsp-*.tar
-elixir_edulsp
+/elixir_edulsp
 
 # Temporary files, for example, from tests.
 /tmp/

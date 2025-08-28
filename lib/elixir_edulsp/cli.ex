@@ -9,9 +9,9 @@ defmodule ElixirEdulsp.CLI do
     |> Enum.find_value(fn line ->
       case Regex.run(pattern, line) do
         [_match, digits] ->
-          result = String.to_integer(digits)
-          Logger.info(content_length: result)
-          result
+          content_length = String.to_integer(digits)
+          Logger.info(content_length: content_length)
+          content_length
 
         nil ->
           Logger.warning(unknown_input: line)
@@ -22,18 +22,13 @@ defmodule ElixirEdulsp.CLI do
 
   @spec read_headers(IO.device()) :: [String]
   defp read_headers(device) do
-    Logger.info("Reading headers until empty line...")
-
     IO.stream(device, :line)
     |> Enum.take_while(fn line -> String.trim(line) != "" end)
   end
 
   @spec read_content(IO.device(), integer()) :: iodata() | IO.nodata()
   defp read_content(device, content_length) do
-    Logger.info("Reading content of length #{content_length}...")
-    content = IO.binread(device, content_length)
-    Logger.info(content: content)
-    content
+    IO.binread(device, content_length)
   end
 
   @spec handle_message(IO.device(), map(), map()) :: map()
@@ -60,30 +55,34 @@ defmodule ElixirEdulsp.CLI do
     Map.put(state, :manager, manager)
   end
 
-  defp handle_message(_device, msg, %{manager: _manager} = state) do
-    Logger.info(unknown_message: msg, state: state)
-    # TODO: Implement
-    # :gen_statem.call(manager, {:message, msg})
+  defp handle_message(_device, msg, %{manager: manager} = state) do
+    :gen_statem.call(manager, {:message, msg})
     state
   end
 
   @spec read_json(IO.device(), map()) :: no_return()
   defp read_json(device, state) do
     # Content-Length: 17\r\n\r\n{"testing": true}
-    content_length = read_content_length(device)
-    read_headers(device)
+    case read_content_length(device) do
+      nil ->
+        :done
 
-    state =
-      case Jason.decode(read_content(device, content_length)) do
-        {:ok, message} ->
-          handle_message(device, message, state)
+      content_length ->
+        read_headers(device)
 
-        {:error, reason} ->
-          Logger.error(decode_error: reason)
-          state
-      end
+        state =
+          case Jason.decode(read_content(device, content_length)) do
+            {:ok, message} ->
+              Logger.info(recv_msg: message)
+              handle_message(device, message, state)
 
-    read_json(device, state)
+            {:error, reason} ->
+              Logger.error(decode_error: reason)
+              state
+          end
+
+        read_json(device, state)
+    end
   end
 
   def main(args) do
@@ -122,15 +121,32 @@ defmodule ElixirEdulsp.Manager do
 
   @impl true
   def init({name, version, device}) do
-    Logger.info(status: :connected, name: name, version: version, device: device)
+    state = :waiting_for_notification
+    Logger.info(state: state, name: name, version: version, device: device)
     new_id = send_initialize_response(device, 1)
-    data = %{name => name, version => version, device => device, id: new_id}
-    {:ok, :connected, data}
+    data = %{name: name, version: version, device: device, id: new_id}
+    {:ok, state, data}
   end
 
   @impl true
-  def handle_event(event_type, event_data, %{id: id} = state, data) do
-    Logger.info(id: id, event_type: event_type, event_data: event_data, state: state, data: data)
+  def handle_event(event_type, event_data, state, data)
+
+  def handle_event(
+        {:call, _from},
+        {:message, %{"method" => "initialized", "params" => params}},
+        :waiting_for_notification = state,
+        data
+      ) do
+    new_state = :ready
+    Logger.info("Received initialized notification")
+    Logger.info(state_change: %{from: state, to: new_state})
+    Logger.info(params: params, state: new_state, data: data)
+    {:next_state, new_state, data}
+  end
+
+  def handle_event(event_type, event_data, state, data) do
+    Logger.info("Unhandled event")
+    Logger.info(event_type: event_type, event_data: event_data, state: state, data: data)
     :keep_state_and_data
   end
 
@@ -140,7 +156,7 @@ defmodule ElixirEdulsp.Manager do
   end
 
   defp send_response(device, body) do
-    Logger.info(response: body)
+    Logger.info(send_msg: body)
     response = encode_response(body)
     IO.binwrite(device, response)
   end

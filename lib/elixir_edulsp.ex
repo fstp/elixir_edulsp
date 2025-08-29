@@ -1,18 +1,11 @@
 defmodule ElixirEdulsp do
-  @moduledoc """
-  Documentation for `ElixirEdulsp`.
-  """
+  use Application
 
-  @doc """
-  Hello world.
+  def start(_type, _args) do
+    children = [
+      %{id: EventManager, start: {:gen_event, :start_link, [{:local, :event_manager}]}}
+    ]
 
-  ## Examples
-
-      iex> ElixirEdulsp.hello()
-      :world
-
-  """
-  def hello do
-    :world
+    Supervisor.start_link(children, strategy: :one_for_one)
   end
 end

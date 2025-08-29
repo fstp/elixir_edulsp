@@ -56,7 +56,12 @@ defmodule ElixirEdulsp.CLI do
   end
 
   defp handle_message(_device, msg, %{manager: manager} = state) do
-    :gen_statem.call(manager, {:message, msg})
+    ElixirEdulsp.Manager.receive_msg(manager, msg)
+    state
+  end
+
+  defp handle_message(_device, msg, state) do
+    Logger.error(error: "Unexpected message", msg: msg, state: state)
     state
   end
 
@@ -116,6 +121,10 @@ defmodule ElixirEdulsp.Manager do
     :gen_statem.stop(pid)
   end
 
+  def receive_msg(pid, msg) do
+    :gen_statem.call(pid, {:message, msg})
+  end
+
   @impl true
   def callback_mode(), do: :handle_event_function
 
@@ -139,14 +148,20 @@ defmodule ElixirEdulsp.Manager do
       ) do
     new_state = :ready
     Logger.info("Received initialized notification")
-    Logger.info(state_change: %{from: state, to: new_state})
     Logger.info(params: params, state: new_state, data: data)
+    Logger.info(state_change: %{from: state, to: new_state})
     {:next_state, new_state, data}
   end
 
   def handle_event(event_type, event_data, state, data) do
-    Logger.info("Unhandled event")
-    Logger.info(event_type: event_type, event_data: event_data, state: state, data: data)
+    Logger.error(
+      error: "Unhandled event",
+      event_type: event_type,
+      event_data: event_data,
+      state: state,
+      data: data
+    )
+
     :keep_state_and_data
   end
 

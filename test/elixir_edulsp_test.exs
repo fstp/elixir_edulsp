@@ -1,3 +1,5 @@
+alias ElixirEdulsp.CLI.Test.EventListener
+
 defmodule ElixirEdulsp.CLI.Test do
   use ExUnit.Case
   use Patch
@@ -53,5 +55,46 @@ defmodule ElixirEdulsp.CLI.Test do
       headers = private(ElixirEdulsp.CLI.read_headers(device))
       assert length(headers) == 2
     end
+  end
+
+  describe "Functional tests" do
+    @tag timeout: 5000
+    test "Run testcase from file" do
+      Patch.expose(ElixirEdulsp.CLI, read_json: 2)
+      EventListener.start(self())
+      {:ok, device} = File.read!("test/testcase.txt") |> StringIO.open()
+      private(ElixirEdulsp.CLI.read_json(device, %{}))
+
+      # Assert that we reach the ready state
+      # (Receive "initialize" and "initialized" notification)
+      assert_receive [state_change: %{to: :ready, from: :waiting_for_notification}]
+    end
+  end
+end
+
+defmodule ElixirEdulsp.CLI.Test.EventListener do
+  @behaviour :gen_event
+  require Logger
+
+  def start(pid) do
+    :gen_event.add_handler(:event_manager, EventListener, %{pid: pid})
+  end
+
+  @impl true
+  def init(state) do
+    Logger.info("Event listener started")
+    {:ok, state}
+  end
+
+  @impl true
+  def handle_event(event, state) do
+    Process.send(state.pid, event, [])
+    {:ok, state}
+  end
+
+  @impl true
+  def handle_call(request, state) do
+    Process.send(state.pid, request, [])
+    {:ok, :ok, state}
   end
 end

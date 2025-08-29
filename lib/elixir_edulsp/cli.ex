@@ -1,3 +1,5 @@
+alias ElixirEdulsp.StateManager
+
 defmodule ElixirEdulsp.CLI do
   require Logger
 
@@ -51,12 +53,13 @@ defmodule ElixirEdulsp.CLI do
          state
        ) do
     Logger.info("Starting new manager")
-    {:ok, manager} = ElixirEdulsp.Manager.start_link(name, version, device)
+    {:ok, manager} = StateManager.start_link(name, version, device)
     Map.put(state, :manager, manager)
   end
 
   defp handle_message(_device, msg, %{manager: manager} = state) do
-    ElixirEdulsp.Manager.receive_msg(manager, msg)
+    Logger.info(manager: manager, msg: msg)
+    StateManager.receive_msg(manager, msg)
     state
   end
 
@@ -108,7 +111,7 @@ defmodule ElixirEdulsp.CLI do
   end
 end
 
-defmodule ElixirEdulsp.Manager do
+defmodule ElixirEdulsp.StateManager do
   @behaviour :gen_statem
   require Logger
 
@@ -138,21 +141,21 @@ defmodule ElixirEdulsp.Manager do
   end
 
   @impl true
-  def handle_event(event_type, event_data, state, data)
-
   def handle_event(
-        {:call, _from},
+        {:call, from},
         {:message, %{"method" => "initialized", "params" => params}},
         :waiting_for_notification = state,
         data
       ) do
     new_state = :ready
+    state_change = %{from: state, to: new_state}
     Logger.info("Received initialized notification")
-    Logger.info(params: params, state: new_state, data: data)
-    Logger.info(state_change: %{from: state, to: new_state})
-    {:next_state, new_state, data}
+    Logger.info(params: params, data: data, state_change: state_change)
+    :gen_event.notify(:event_manager, state_change: state_change)
+    {:next_state, new_state, data, {:reply, from, :ok}}
   end
 
+  @impl true
   def handle_event(event_type, event_data, state, data) do
     Logger.error(
       error: "Unhandled event",

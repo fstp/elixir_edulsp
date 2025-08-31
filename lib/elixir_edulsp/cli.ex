@@ -30,7 +30,8 @@ defmodule ElixirEdulsp.CLI do
 
   @spec read_content(IO.device(), integer()) :: iodata() | IO.nodata()
   defp read_content(device, content_length) do
-    IO.binread(device, content_length)
+    message = IO.binread(device, content_length)
+    message
   end
 
   @spec handle_message(IO.device(), map(), map()) :: map()
@@ -52,13 +53,11 @@ defmodule ElixirEdulsp.CLI do
          },
          state
        ) do
-    Logger.info("Starting new manager")
     {:ok, manager} = StateManager.start_link(name, version, device)
     Map.put(state, :manager, manager)
   end
 
   defp handle_message(_device, msg, %{manager: manager} = state) do
-    Logger.info(manager: manager, msg: msg)
     StateManager.receive_msg(manager, msg)
     state
   end
@@ -81,7 +80,6 @@ defmodule ElixirEdulsp.CLI do
         state =
           case Jason.decode(read_content(device, content_length)) do
             {:ok, message} ->
-              Logger.info(recv_msg: message)
               handle_message(device, message, state)
 
             {:error, reason} ->
@@ -129,43 +127,94 @@ defmodule ElixirEdulsp.StateManager do
   end
 
   @impl true
-  def callback_mode(), do: :handle_event_function
+  def callback_mode(), do: [:handle_event_function, :state_enter]
 
   @impl true
   def init({name, version, device}) do
-    state = :waiting_for_notification
-    Logger.info(state: state, name: name, version: version, device: device)
-    new_id = send_initialize_response(device, 1)
-    data = %{name: name, version: version, device: device, id: new_id}
-    {:ok, state, data}
+    data = %{name: name, version: version, device: device}
+    Logger.info("Received initialize request")
+    Logger.info(data: data)
+    send_initialize_response(device)
+    {:ok, :waiting_for_notification, data}
   end
 
   @impl true
   def handle_event(
         {:call, from},
         {:message, %{"method" => "initialized", "params" => params}},
-        :waiting_for_notification = state,
+        :waiting_for_notification,
         data
       ) do
-    new_state = :ready
-    state_change = %{from: state, to: new_state}
     Logger.info("Received initialized notification")
-    Logger.info(params: params, data: data, state_change: state_change)
-    :gen_event.notify(:event_manager, state_change: state_change)
-    {:next_state, new_state, data, {:reply, from, :ok}}
+    Logger.info(params: params, data: data)
+    {:next_state, :ready, data, {:reply, from, :ok}}
   end
 
   @impl true
-  def handle_event(event_type, event_data, state, data) do
+  def handle_event(
+        {:call, from},
+        {:message, %{"method" => "textDocument/didOpen", "params" => params}},
+        :ready,
+        data
+      ) do
+    Logger.info("Received didOpen notification")
+    Logger.info(params: params, data: data)
+    {:keep_state_and_data, {:reply, from, :ok}}
+  end
+
+  @impl true
+  def handle_event(
+        {:call, from},
+        {:message, %{"method" => "textDocument/didChange", "params" => params}},
+        :ready,
+        _data
+      ) do
+    Logger.info("Received didChange notification")
+
+    format_pos = fn change, pos ->
+      range = get_in(change, ["range", pos])
+      "line #{range["line"]}, char #{range["character"]}"
+    end
+
+    params["contentChanges"]
+    |> Enum.each(fn change ->
+      Logger.info(
+        "Change:\n#{change["text"]}\nStart: #{format_pos.(change, "start")}\nEnd: #{format_pos.(change, "end")}"
+      )
+    end)
+
+    {:keep_state_and_data, {:reply, from, :ok}}
+  end
+
+  @impl true
+  def handle_event(
+        {:call, from},
+        {:message, %{"method" => "textDocument/didSave", "params" => params}},
+        :ready,
+        _data
+      ) do
+    Logger.info("Received didSave notification")
+    Logger.info([params: params])
+    {:keep_state_and_data, {:reply, from, :ok}}
+  end
+
+  @impl true
+  def handle_event(:enter, old_state, new_state, _data) do
+    Logger.info("#{old_state} -> #{new_state}")
+    :gen_event.notify(:event_manager, state_change: %{from: old_state, to: new_state})
+    :keep_state_and_data
+  end
+
+  @impl true
+  def handle_event({:call, from}, event_data, state, data) do
     Logger.error(
       error: "Unhandled event",
-      event_type: event_type,
       event_data: event_data,
       state: state,
       data: data
     )
 
-    :keep_state_and_data
+    {:keep_state_and_data, {:reply, from, :ok}}
   end
 
   defp encode_response(body) do
@@ -174,37 +223,22 @@ defmodule ElixirEdulsp.StateManager do
   end
 
   defp send_response(device, body) do
-    Logger.info(send_msg: body)
+    Logger.info(send_message: body)
     response = encode_response(body)
     IO.binwrite(device, response)
   end
 
-  defp send_initialize_response(device, id) do
+  defp send_initialize_response(device) do
     body = %{
       "capabilities" => %{
-        "textDocumentSync" => 1,
-        "hoverProvider" => true,
-        "completionProvider" => %{"resolveProvider" => false, "triggerCharacters" => ["."]},
-        "signatureHelpProvider" => %{
-          "triggerCharacters" => ["(", ","],
-          "retriggerCharacters" => [")"]
-        },
-        "definitionProvider" => true,
-        "referencesProvider" => true,
-        "documentHighlightProvider" => true,
-        "documentSymbolProvider" => true,
-        "workspaceSymbolProvider" => true,
-        "codeActionProvider" => true,
-        "codeLensProvider" => %{"resolveProvider" => false},
-        "documentFormattingProvider" => true,
-        "documentRangeFormattingProvider" => true,
-        "renameProvider" => true,
-        "foldingRangeProvider" => true
+        "textDocumentSync" => 2,
+        "notebookDocumentSync" => "notebook",
+        "hoverProvider" => true
       },
       "serverInfo" => %{"name" => "elixir_edulsp", "version" => "0.1.0"}
     }
 
-    send_response(device, %{"jsonrpc" => "2.0", "id" => id, "result" => body})
-    id + 1
+    Logger.info("Sending initialize response")
+    send_response(device, %{"jsonrpc" => "2.0", "id" => 1, "result" => body})
   end
 end

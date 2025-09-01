@@ -12,7 +12,7 @@ defmodule ElixirEdulsp.CLI do
       case Regex.run(pattern, line) do
         [_match, digits] ->
           content_length = String.to_integer(digits)
-          Logger.info(content_length: content_length)
+          # Logger.info(content_length: content_length)
           content_length
 
         nil ->
@@ -169,17 +169,17 @@ defmodule ElixirEdulsp.StateManager do
         :ready,
         _data
       ) do
-    Logger.info("Received didChange notification")
+    # Logger.info("Received didChange notification")
 
     format_pos = fn change, pos ->
       range = get_in(change, ["range", pos])
-      "line #{range["line"]}, char #{range["character"]}"
+      "(#{range["line"]}, #{range["character"]})"
     end
 
     params["contentChanges"]
     |> Enum.each(fn change ->
       Logger.info(
-        "Change:\n#{change["text"]}\nStart: #{format_pos.(change, "start")}\nEnd: #{format_pos.(change, "end")}"
+        "Change: #{format_pos.(change, "start")} -> #{format_pos.(change, "end")}\n#{change["text"]}"
       )
     end)
 
@@ -194,7 +194,40 @@ defmodule ElixirEdulsp.StateManager do
         _data
       ) do
     Logger.info("Received didSave notification")
-    Logger.info([params: params])
+    Logger.info(params: params)
+    {:keep_state_and_data, {:reply, from, :ok}}
+  end
+
+  @impl true
+  def handle_event(
+        {:call, from},
+        {:message, %{"id" => id, "method" => "textDocument/hover", "params" => params}},
+        :ready,
+        %{device: device}
+      ) do
+    Logger.info("Received hover request")
+    Logger.info(id: id, params: params)
+
+    %{"position" => %{"character" => char, "line" => line}} = params
+
+    # Neovim line/columns are 1-based, LSP is 0-based
+    content = """
+    Line: #{line + 1}
+    Column: #{char + 1}
+    """
+
+    send_hover_response(device, id, content)
+    {:keep_state_and_data, {:reply, from, :ok}}
+  end
+
+  @impl true
+  def handle_event(
+        {:call, from},
+        {:message, %{"method" => "textDocument/didClose"}},
+        :ready,
+        _data
+      ) do
+    Logger.info("Received didClose notification")
     {:keep_state_and_data, {:reply, from, :ok}}
   end
 
@@ -226,6 +259,12 @@ defmodule ElixirEdulsp.StateManager do
     Logger.info(send_message: body)
     response = encode_response(body)
     IO.binwrite(device, response)
+  end
+
+  defp send_hover_response(device, id, contents) do
+    Logger.info("Sending hover response")
+
+    send_response(device, %{"jsonrpc" => "2.0", "id" => id, "result" => %{"contents" => contents}})
   end
 
   defp send_initialize_response(device) do

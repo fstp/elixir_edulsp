@@ -232,6 +232,34 @@ defmodule ElixirEdulsp.StateManager do
   end
 
   @impl true
+  @doc """
+  Handles a code action request that was explicitly triggered by the user or an extension.
+
+  This clause specifically processes textDocument/codeAction requests with triggerKind=1,
+  which indicates an explicit user-initiated code action request rather than an automatic one.
+  It logs the diagnostics and range information associated with the request.
+  """
+  def handle_event(
+        {:call, from},
+        {:message,
+         %{
+           "id" => _id,
+           "method" => "textDocument/codeAction",
+           "params" => %{
+             "context" => %{"diagnostics" => diag, "triggerKind" => 1},
+             "range" => range
+           }
+         }},
+        :ready,
+        _data
+      ) do
+    Logger.info("Received codeAction request (explicit trigger)")
+    Logger.info(diagnostics: diag)
+    Logger.info(range: range)
+    {:keep_state_and_data, {:reply, from, :ok}}
+  end
+
+  @impl true
   def handle_event(:enter, old_state, new_state, _data) do
     Logger.info("#{old_state} -> #{new_state}")
     :gen_event.notify(:event_manager, state_change: %{from: old_state, to: new_state})
@@ -250,34 +278,31 @@ defmodule ElixirEdulsp.StateManager do
     {:keep_state_and_data, {:reply, from, :ok}}
   end
 
-  defp encode_response(body) do
-    body_json = Jason.encode!(body)
-    "Content-Length: #{byte_size(body_json)}\r\n\r\n#{body_json}"
-  end
-
-  defp send_response(device, body) do
-    Logger.info(send_message: body)
-    response = encode_response(body)
+  defp send_response(device, id, result) do
+    msg = %{"jsonrpc" => "2.0", "id" => id, "result" => result}
+    Logger.info(send_message: msg)
+    json = Jason.encode!(msg)
+    response = "Content-Length: #{byte_size(json)}\r\n\r\n#{json}"
     IO.binwrite(device, response)
   end
 
   defp send_hover_response(device, id, contents) do
     Logger.info("Sending hover response")
-
-    send_response(device, %{"jsonrpc" => "2.0", "id" => id, "result" => %{"contents" => contents}})
+    send_response(device, id, %{"contents" => contents})
   end
 
   defp send_initialize_response(device) do
-    body = %{
+    contents = %{
       "capabilities" => %{
         "textDocumentSync" => 2,
         "notebookDocumentSync" => "notebook",
-        "hoverProvider" => true
+        "hoverProvider" => true,
+        "codeActionProvider" => true
       },
       "serverInfo" => %{"name" => "elixir_edulsp", "version" => "0.1.0"}
     }
 
     Logger.info("Sending initialize response")
-    send_response(device, %{"jsonrpc" => "2.0", "id" => 1, "result" => body})
+    send_response(device, 1, contents)
   end
 end

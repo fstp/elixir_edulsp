@@ -153,24 +153,38 @@ defmodule ElixirEdulsp.StateManager do
   @impl true
   def handle_event(
         {:call, from},
-        {:message, %{"method" => "textDocument/didOpen", "params" => params}},
-        :ready,
-        data
+        {:message,
+         %{
+           "method" => "textDocument/didOpen",
+           "params" => %{"textDocument" => %{"uri" => "file://"}}
+         }},
+        _state,
+        _data
       ) do
-    Logger.info("Received didOpen notification")
-    Logger.info(params: params, data: data)
+    Logger.info("Hover window opened")
     {:keep_state_and_data, {:reply, from, :ok}}
   end
 
   @impl true
   def handle_event(
         {:call, from},
-        {:message, %{"method" => "textDocument/didChange", "params" => params}},
-        :ready,
-        _data
+        {:message, %{"method" => "textDocument/didOpen", "params" => params}},
+        _state,
+        data
       ) do
-    # Logger.info("Received didChange notification")
+    %{"textDocument" => %{"text" => text}} = params
+    lines = String.split(text, "\n")
+    Logger.info("Received didOpen notification")
+    {:next_state, :document, Map.put(data, :lines, lines), {:reply, from, :ok}}
+  end
 
+  @impl true
+  def handle_event(
+        {:call, from},
+        {:message, %{"method" => "textDocument/didChange", "params" => params}},
+        :document,
+        %{lines: lines} = data
+      ) do
     format_pos = fn change, pos ->
       range = get_in(change, ["range", pos])
       "(#{range["line"]}, #{range["character"]})"
@@ -183,18 +197,26 @@ defmodule ElixirEdulsp.StateManager do
       )
     end)
 
-    {:keep_state_and_data, {:reply, from, :ok}}
+    updated_lines =
+      params["contentChanges"]
+      |> Enum.reduce(lines, fn change, acc ->
+        Logger.info(change: change)
+        update_document(acc, change["range"], change["text"])
+      end)
+
+    Logger.info("Document:\n#{Enum.join(updated_lines, "\n")}")
+
+    {:next_state, :document, %{data | lines: updated_lines}, {:reply, from, :ok}}
   end
 
   @impl true
   def handle_event(
         {:call, from},
-        {:message, %{"method" => "textDocument/didSave", "params" => params}},
-        :ready,
+        {:message, %{"method" => "textDocument/didSave"}},
+        :document,
         _data
       ) do
     Logger.info("Received didSave notification")
-    Logger.info(params: params)
     {:keep_state_and_data, {:reply, from, :ok}}
   end
 
@@ -202,21 +224,37 @@ defmodule ElixirEdulsp.StateManager do
   def handle_event(
         {:call, from},
         {:message, %{"id" => id, "method" => "textDocument/hover", "params" => params}},
-        :ready,
+        :document,
         %{device: device}
       ) do
     Logger.info("Received hover request")
-    Logger.info(id: id, params: params)
 
     %{"position" => %{"character" => char, "line" => line}} = params
 
     # Neovim line/columns are 1-based, LSP is 0-based
-    content = """
+    hover_text = """
     Line: #{line + 1}
     Column: #{char + 1}
     """
 
-    send_hover_response(device, id, content)
+    send_hover_response(device, id, hover_text)
+    {:keep_state_and_data, {:reply, from, :ok}}
+  end
+
+  @impl true
+  # Handles the hover window being closed in Neovim.
+  # TODO: detecting the hover window by checking for a specific URI.
+  def handle_event(
+        {:call, from},
+        {:message,
+         %{
+           "method" => "textDocument/didClose",
+           "params" => %{"textDocument" => %{"uri" => "file://"}}
+         }},
+        _state,
+        _data
+      ) do
+    Logger.info("Hover window closed")
     {:keep_state_and_data, {:reply, from, :ok}}
   end
 
@@ -224,7 +262,7 @@ defmodule ElixirEdulsp.StateManager do
   def handle_event(
         {:call, from},
         {:message, %{"method" => "textDocument/didClose"}},
-        :ready,
+        _state,
         _data
       ) do
     Logger.info("Received didClose notification")
@@ -232,30 +270,27 @@ defmodule ElixirEdulsp.StateManager do
   end
 
   @impl true
-  @doc """
-  Handles a code action request that was explicitly triggered by the user or an extension.
-
-  This clause specifically processes textDocument/codeAction requests with triggerKind=1,
-  which indicates an explicit user-initiated code action request rather than an automatic one.
-  It logs the diagnostics and range information associated with the request.
-  """
+  # Handles a code action request that was explicitly triggered by the user or an extension.
+  # This clause specifically processes textDocument/codeAction requests with triggerKind=1,
+  # which indicates an explicit user-initiated code action request rather than an automatic one.
   def handle_event(
         {:call, from},
         {:message,
          %{
-           "id" => _id,
+           "id" => id,
            "method" => "textDocument/codeAction",
            "params" => %{
              "context" => %{"diagnostics" => diag, "triggerKind" => 1},
              "range" => range
            }
          }},
-        :ready,
-        _data
+        :document,
+        %{device: device}
       ) do
     Logger.info("Received codeAction request (explicit trigger)")
     Logger.info(diagnostics: diag)
     Logger.info(range: range)
+    send_code_action_response(device, id, "Change the word to 'ElixirEdulsp'")
     {:keep_state_and_data, {:reply, from, :ok}}
   end
 
@@ -286,9 +321,14 @@ defmodule ElixirEdulsp.StateManager do
     IO.binwrite(device, response)
   end
 
-  defp send_hover_response(device, id, contents) do
+  defp send_hover_response(device, id, hover_text) do
     Logger.info("Sending hover response")
-    send_response(device, id, %{"contents" => contents})
+    send_response(device, id, %{"contents" => hover_text})
+  end
+
+  defp send_code_action_response(device, id, title) do
+    Logger.info("Sending codeAction response")
+    send_response(device, id, [%{"title" => title, "kind" => "quickfix"}])
   end
 
   defp send_initialize_response(device) do
@@ -304,5 +344,25 @@ defmodule ElixirEdulsp.StateManager do
 
     Logger.info("Sending initialize response")
     send_response(device, 1, contents)
+  end
+
+  def update_document(lines, %{"end" => end_, "start" => start}, new_text) do
+    # Convert to 0-indexed
+    line_index = start["line"]
+    line = Enum.at(lines, line_index)
+
+    Logger.info(line: line)
+
+    Logger.info(
+      "Updating line #{line_index + 1} (#{start["character"]}..#{end_["character"]}) with '#{new_text}'"
+    )
+
+    # Update the line (assuming character positions are 0-indexed)
+    pre = String.slice(line, 0, start["character"])
+    post = String.slice(line, end_["character"]..-1)
+    Logger.info(pre: pre, new_test: new_text, post: post)
+    updated_line = pre <> new_text <> post
+
+    List.replace_at(lines, line_index, updated_line)
   end
 end

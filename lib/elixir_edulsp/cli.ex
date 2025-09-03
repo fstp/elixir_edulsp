@@ -280,17 +280,80 @@ defmodule ElixirEdulsp.StateManager do
            "id" => id,
            "method" => "textDocument/codeAction",
            "params" => %{
+             "textDocument" => %{"uri" => uri},
              "context" => %{"diagnostics" => diag, "triggerKind" => 1},
              "range" => range
            }
          }},
         :document,
-        %{device: device}
+        %{device: device, lines: lines}
       ) do
     Logger.info("Received codeAction request (explicit trigger)")
     Logger.info(diagnostics: diag)
-    Logger.info(range: range)
-    send_code_action_response(device, id, "Change the word to 'ElixirEdulsp'")
+    %{"start" => %{"line" => start_line, "character" => start_character}} = range
+
+    %{word: word, word_start: word_start, word_end: word_end} =
+      find_word_at_position(lines, start_line, start_character)
+
+    edit = %{
+      "changes" => %{
+        uri => [
+          %{
+            "range" => %{
+              "start" => %{"line" => start_line, "character" => word_start},
+              # +1 to include the last character (exclusive range)
+              "end" => %{"line" => start_line, "character" => word_end + 1}
+            },
+            "newText" => "ElixirEdulsp"
+          }
+        ]
+      }
+    }
+
+    Logger.info(word: word, word_start: word_start, word_end: word_end, edit: edit)
+
+    title = "Change the word to 'ElixirEdulsp'"
+    send_code_action_response(device, id, title, edit)
+    {:keep_state_and_data, {:reply, from, :ok}}
+  end
+
+  @impl true
+  def handle_event(
+        {:call, from},
+        {:message, %{"id" => id, "method" => "shutdown"}},
+        _state,
+        %{device: device} = data
+      ) do
+    Logger.info("Received shutdown request")
+    send_shutdown_response(device, id)
+    {:next_state, :shutting_down, data, {:reply, from, :ok}}
+  end
+
+  @impl true
+  # Exit with success only if we received a
+  # shutdown request before receiving the
+  # exit notification.
+  def handle_event(
+        {:call, from},
+        {:message, %{"method" => "exit"}},
+        state,
+        _data
+      ) do
+    Logger.info("Received exit notification")
+
+    code =
+      case state do
+        :shutting_down ->
+          Logger.info("Exiting with success")
+          0
+
+        _ ->
+          Logger.error("Exiting with failure")
+          1
+      end
+
+    Logger.flush()
+    System.halt(code)
     {:keep_state_and_data, {:reply, from, :ok}}
   end
 
@@ -326,9 +389,9 @@ defmodule ElixirEdulsp.StateManager do
     send_response(device, id, %{"contents" => hover_text})
   end
 
-  defp send_code_action_response(device, id, title) do
+  defp send_code_action_response(device, id, title, edit) do
     Logger.info("Sending codeAction response")
-    send_response(device, id, [%{"title" => title, "kind" => "quickfix"}])
+    send_response(device, id, [%{"title" => title, "kind" => "refactor.rewrite", "edit" => edit}])
   end
 
   defp send_initialize_response(device) do
@@ -344,6 +407,11 @@ defmodule ElixirEdulsp.StateManager do
 
     Logger.info("Sending initialize response")
     send_response(device, 1, contents)
+  end
+
+  defp send_shutdown_response(device, id) do
+    Logger.info("Sending shutdown response")
+    send_response(device, id, nil)
   end
 
   def update_document(lines, %{"end" => end_, "start" => start}, new_text) do
@@ -364,5 +432,60 @@ defmodule ElixirEdulsp.StateManager do
     updated_line = pre <> new_text <> post
 
     List.replace_at(lines, line_index, updated_line)
+  end
+
+  def find_word_at_position(lines, line_num, char_num) do
+    case Enum.at(lines, line_num) do
+      nil ->
+        Logger.error("Line number #{line_num} out of bounds")
+        nil
+
+      line ->
+        find_word_in_line(line, char_num)
+    end
+  end
+
+  defp find_word_in_line(line, char_index) do
+    # Convert to grapheme-based indexing for proper Unicode handling
+    graphemes = String.graphemes(line)
+    line_length = length(graphemes)
+
+    if char_index < 0 or char_index >= line_length do
+      Logger.error("Column index #{char_index} out of bounds, line length is #{line_length}")
+      nil
+    else
+      # Find word start and end (go backwards/forwards until we find a space or beginning)
+      start_index = find_word_start(graphemes, char_index)
+      end_index = find_word_end(graphemes, char_index, line_length - 1)
+
+      word =
+        graphemes
+        |> Enum.slice(start_index..end_index)
+        |> Enum.join()
+
+      %{word_start: start_index, word_end: end_index, word: word}
+    end
+  end
+
+  defp find_word_start(_graphemes, 0) do
+    0
+  end
+
+  defp find_word_start(graphemes, current_index) do
+    case Enum.at(graphemes, current_index - 1) do
+      " " -> current_index
+      _ -> find_word_start(graphemes, current_index - 1)
+    end
+  end
+
+  defp find_word_end(_graphemes, max_index, max_index) do
+    max_index
+  end
+
+  defp find_word_end(graphemes, current_index, max_index) do
+    case Enum.at(graphemes, current_index + 1) do
+      " " -> current_index
+      _ -> find_word_end(graphemes, current_index + 1, max_index)
+    end
   end
 end
